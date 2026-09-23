@@ -252,6 +252,10 @@ class MoEDecoderLayer(nn.Module):
         float8_cfg: Float8Config | None = None,
         layer_idx: int = 0,
         dispatcher: Literal["deepep", "all2all", "agrs"] | None,
+        moe_backend: Literal["native", "uniep", "liger"] | None = None,
+        moe_backend_max_tokens: int | None = None,
+        moe_backend_num_sm: int = 64,
+        moe_backend_num_hosts: int = 1,
         ep_mesh: DeviceMesh | None = None,
         expert_tp_mesh: DeviceMesh | None = None,
         ep_tp_mesh: DeviceMesh | None = None,
@@ -329,6 +333,28 @@ class MoEDecoderLayer(nn.Module):
             generate_dtype=generate_config.dtype if generate_config is not None else "bf16",
         )
 
+        # ---- optional fused-EP backend (moe_backend != "native") ----------
+        # Replaces the whole routed-expert segment (dispatch -> experts ->
+        # combine) with one fused call; the native dispatcher above stays
+        # constructed (parameter/FSDP layout is unchanged) but is bypassed
+        # on the fused path. The backend session is created lazily on first
+        # forward because NVSHMEM/team bootstrap needs a live device context.
+        self.moe_backend = moe_backend or "native"
+        self._moe_top_k = num_experts_per_tok  # for backend sessions
+        self._moe_backend_kwargs = dict(
+            max_tokens=moe_backend_max_tokens,
+            num_sm=moe_backend_num_sm,
+            num_hosts=moe_backend_num_hosts,
+        )
+        self._moe_backend_session = None
+        if self.moe_backend != "native":
+            if moe_act_fn_cfg.act_type != "swiglu":
+                raise ValueError("Fused-EP backends require plain SwiGLU; clipped SwiGLU is unsupported.")
+            if float8_cfg is not None:
+                raise ValueError("fused-EP MoE backends do not support float8 training yet.")
+            if expert_tp_mesh is not None:
+                raise ValueError("fused-EP MoE backends do not support expert TP yet.")
+
     def forward(
         self,
         hidden_states: torch.Tensor | list[torch.Tensor],
@@ -374,6 +400,11 @@ class MoEDecoderLayer(nn.Module):
         assert isinstance(position_embeddings, list) and len(position_embeddings) == len(hidden_states), (
             "position_embeddings should be a list of tuples with the same length as hidden_states"
         )
+        if self.moe_backend != "native":
+            raise NotImplementedError(
+                "Fused-EP MoE backends (uniep/liger) do not support intra-layer "
+                "micro-batching (domino EP) yet; set intra_layer_micro_batch=1."
+            )
 
         return self._micro_batch_forward(
             hidden_states_list=hidden_states,
@@ -435,6 +466,44 @@ class MoEDecoderLayer(nn.Module):
         )
 
         origin_shape = hidden_states.shape
+
+        if self.moe_backend != "native":
+            # ---- fused-EP backend path -----------------------------------
+            # Replaces dispatch -> experts -> combine with one fused call.
+            # Router / shared experts / residual / hidden_factor scaling stay
+            # on the XTuner side, so the model math outside the routed-expert
+            # segment is identical to the native path.
+            if self._moe_backend_session is None:
+                from xtuner.v1.module.moe_backend import build_fused_ep_forward
+
+                self._moe_backend_session = build_fused_ep_forward(
+                    self.moe_backend,
+                    layer=self,
+                    ep_group=self.ep_mesh.get_group() if self.ep_mesh is not None else None,
+                    **self._moe_backend_kwargs,
+                )
+            combined_hidden_states = self._moe_backend_session(
+                hidden_states.view(-1, hidden_states.shape[-1]),
+                router_results["topk_ids"],
+                router_results["topk_weights"],
+            )
+            combined_hidden_states = combined_hidden_states.view(*origin_shape)
+
+            if self.n_shared_experts > 0:
+                shared_experts_out = self._shared_experts_forward(hidden_states=hidden_states)
+            else:
+                shared_experts_out = None
+
+            hidden_states = self._post_moe_forward(
+                combined_hidden_states=combined_hidden_states,
+                residual=residual,
+                shared_experts_out=shared_experts_out,
+            )
+            return self._build_output(
+                hidden_states=hidden_states,
+                router_results=router_results,
+                attn_outputs=attn_outputs,
+            )
 
         # reshape hidden_states to (batch_size * seq_len, hidden_size)
         # ProberList.before_dispatch(

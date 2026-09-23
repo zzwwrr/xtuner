@@ -160,6 +160,22 @@ class MoEConfig(TransformerConfig):
     ep_size: Annotated[int, Parameter(group="moe")] = 1
     expert_tp_size: Annotated[int, Parameter(group="moe")] = 1
     dispatcher: Annotated[Literal["deepep", "all2all", "agrs"] | None, Parameter(group="moe")] = None
+    # Optional fused-EP MoE backend replacing the whole routed-expert segment
+    # (dispatch -> experts -> combine). "native" (default) keeps the original
+    # dispatcher + MoEBlock path untouched. See
+    # xtuner/v1/module/moe_backend/ for the backend implementations.
+    moe_backend: Annotated[
+        Literal["native", "uniep", "liger"] | None, Parameter(group="moe")
+    ] = None
+    # Symmetric-workspace token capacity for fused backends (per rank).
+    # Must cover the largest T*K the run will see; only read when
+    # moe_backend is set. None -> backend default (8192*K for uniep, 8192 for liger).
+    moe_backend_max_tokens: Annotated[int | None, Parameter(group="moe")] = None
+    # UniEP megakernel SM budget (H800 tuning tables use 64).
+    moe_backend_num_sm: Annotated[int, Parameter(group="moe")] = 64
+    # Liger symmetric-memory topology: number of hosts spanned by the EP group.
+    # 1 = single node (the validated configuration).
+    moe_backend_num_hosts: Annotated[int, Parameter(group="moe")] = 1
     router: GreedyRouterConfig | NoAuxRouterConfig
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None
@@ -186,7 +202,10 @@ class MoEConfig(TransformerConfig):
 
 def use_moe_ep_compile_cfg(config: MoEConfig) -> bool:
     # 中文注释：ExpertTP 也会跨 rank 进入 dispatcher 通信段，compile 边界应和 EP 路径一致。
-    return config.ep_size > 1 or config.expert_tp_size > 1
+    # Fused-EP backend 的调度在自定义 autograd Function 里，MoEDecoderLayer.forward
+    # 不能进 fullgraph compile，因此一并按 EP 路径处理。
+    backend_active = (config.moe_backend or "native") != "native"
+    return config.ep_size > 1 or config.expert_tp_size > 1 or backend_active
 
 
 class MoE(BaseModel):
@@ -1153,6 +1172,10 @@ class MoE(BaseModel):
                     float8_cfg=config.float8_cfg,
                     layer_idx=layer_idx,
                     dispatcher=config.dispatcher,
+                    moe_backend=config.moe_backend,
+                    moe_backend_max_tokens=config.moe_backend_max_tokens,
+                    moe_backend_num_sm=config.moe_backend_num_sm,
+                    moe_backend_num_hosts=config.moe_backend_num_hosts,
                     ep_mesh=self.ep_mesh,
                     expert_tp_mesh=self.expert_tp_mesh,
                     ep_tp_mesh=self.ep_tp_mesh,
@@ -1220,6 +1243,10 @@ class MoE(BaseModel):
                 float8_cfg=config.float8_cfg,
                 layer_idx=config.num_hidden_layers + i,
                 dispatcher=config.dispatcher,
+                moe_backend=config.moe_backend,
+                moe_backend_max_tokens=config.moe_backend_max_tokens,
+                moe_backend_num_sm=config.moe_backend_num_sm,
+                moe_backend_num_hosts=config.moe_backend_num_hosts,
                 ep_mesh=self.ep_mesh,
                 expert_tp_mesh=self.expert_tp_mesh,
                 ep_tp_mesh=self.ep_tp_mesh,
