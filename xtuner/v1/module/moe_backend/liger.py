@@ -61,6 +61,9 @@ import torch
 # single cat in backward, instead of two slice+contiguous nodes whose backward
 # allocates two zero-filled w13-sized buffers and adds them.
 W13_SPLIT_CAT = os.environ.get("XTUNER_LIGER_W13_SPLIT_CAT", "0") == "1"
+# Candidate #2 (default off): when moe_fused takes its no-grad path (checkpoint
+# F0, eval), pass strided gate/up views of w13 instead of contiguous copies.
+NOGRAD_STRIDED = os.environ.get("XTUNER_LIGER_NOGRAD_STRIDED", "0") == "1"
 
 
 class _SplitW13(torch.autograd.Function):
@@ -205,7 +208,16 @@ class LigerCuteSession:
         # Differentiable copies: Liger's backward requires gate/up as separate
         # contiguous [E_local, I, H] tensors; autograd scatters the gradients
         # back into the fused XTuner parameter.
-        if W13_SPLIT_CAT:
+        # Same predicate as moe_fused's no-grad branch, which accepts gate/up
+        # views with an expert stride; the grad branch rejects them. The bf16
+        # cast below keeps requires_grad, so testing the input is equivalent.
+        needs_grad = torch.is_grad_enabled() and any(
+            t.requires_grad for t in (hidden_states, topk_weights, w13, w2)
+        )
+        if NOGRAD_STRIDED and not needs_grad:
+            all_b = w13[:, : self.intermediate_size, :]  # gate, strided view
+            all_c = w13[:, self.intermediate_size :, :]  # up, strided view
+        elif W13_SPLIT_CAT:
             all_b, all_c = _SplitW13.apply(w13, self.intermediate_size)
         else:
             all_b = w13[:, : self.intermediate_size, :].contiguous()  # gate

@@ -101,3 +101,117 @@ def test_flag_default_off(monkeypatch):
     assert _load().W13_SPLIT_CAT is False
     monkeypatch.setenv("XTUNER_LIGER_W13_SPLIT_CAT", "1")
     assert _load().W13_SPLIT_CAT is True
+
+
+# --------------------------------------------------------------------------- #2
+import sys
+import types
+from types import SimpleNamespace
+
+
+def _fake_moe_fused_factory(calls):
+    """Stand-in for liger_kernel.ops.cute.ops.moe_fused with the same branch rule.
+
+    Grad branch rejects non-contiguous gate/up exactly like
+    ``LigerExpertParallelFusedMoEFunction.forward``; both branches compute a CPU
+    reference MoE (SwiGLU experts, weighted top-k sum) from whatever views arrive.
+    """
+
+    def moe_fused(X, expert_indices, expert_weights, all_B, all_C, all_A, num_experts, top_k, pg=None):
+        needs_grad = torch.is_grad_enabled() and any(
+            t.requires_grad for t in (X, expert_weights, all_B, all_C, all_A)
+        )
+        calls.append(dict(needs_grad=needs_grad, b_contig=all_B.is_contiguous(), c_contig=all_C.is_contiguous(),
+                          b_stride=all_B.stride(), c_ptr_off=all_C.data_ptr() - all_B.data_ptr()))
+        if needs_grad and not (all_B.is_contiguous() and all_C.is_contiguous()):
+            raise ValueError("Strided MoE gate/up weights are supported only when gradients are disabled")
+        xf = X.float()
+        y = torch.zeros_like(xf)
+        for k in range(top_k):
+            e = expert_indices[:, k].long()
+            g = torch.einsum("th,tih->ti", xf, all_B[e].float())
+            u = torch.einsum("th,tih->ti", xf, all_C[e].float())
+            h = torch.nn.functional.silu(g) * u
+            y = y + expert_weights[:, k : k + 1].float() * torch.einsum("ti,thi->th", h, all_A[e].float())
+        return y.to(X.dtype)
+
+    return moe_fused
+
+
+@pytest.fixture
+def fake_liger(monkeypatch):
+    calls = []
+    ops = types.ModuleType("liger_kernel.ops.cute.ops")
+    ops.moe_fused = _fake_moe_fused_factory(calls)
+    for name in ("liger_kernel", "liger_kernel.ops", "liger_kernel.ops.cute"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "liger_kernel.ops.cute.ops", ops)
+    return calls
+
+
+def _session(mod, e_local=4, i=8, h=16, k=2, requires_grad=True, seed=3):
+    torch.manual_seed(seed)
+    w13 = torch.nn.Parameter(torch.randn(e_local * 2 * i, h) * 0.1, requires_grad=requires_grad)
+    w2 = torch.nn.Parameter(torch.randn(e_local * h, i) * 0.1, requires_grad=requires_grad)
+    experts = SimpleNamespace(fused_w1w3=SimpleNamespace(weight=w13), fused_w2=SimpleNamespace(weight=w2))
+    sess = SimpleNamespace(layer=SimpleNamespace(experts=experts), n_routed_experts=e_local,
+                           ep_group=SimpleNamespace(size=lambda: 1), intermediate_size=i, hidden_size=h, top_k=k)
+    return sess, w13, w2
+
+
+def _inputs(e_local=4, h=16, k=2, t=10, seed=4):
+    torch.manual_seed(seed)
+    x = torch.randn(t, h)
+    ids = torch.stack([torch.randperm(e_local)[:k] for _ in range(t)])
+    w = torch.softmax(torch.randn(t, k), -1)
+    return x, ids, w
+
+
+@pytest.mark.parametrize("split_cat", [False, True])
+def test_nograd_strided_passes_views_and_matches(monkeypatch, fake_liger, split_cat):
+    mod = _load()
+    sess, *_ = _session(mod)
+    x, ids, w = _inputs()
+    monkeypatch.setattr(mod, "W13_SPLIT_CAT", split_cat)
+
+    monkeypatch.setattr(mod, "NOGRAD_STRIDED", False)
+    with torch.no_grad():
+        ref = mod.LigerCuteSession.__call__(sess, x, ids, w)
+    monkeypatch.setattr(mod, "NOGRAD_STRIDED", True)
+    with torch.no_grad():
+        out = mod.LigerCuteSession.__call__(sess, x, ids, w)
+
+    assert fake_liger[0]["b_contig"] and fake_liger[0]["c_contig"]
+    last = fake_liger[1]
+    assert not last["needs_grad"] and not last["b_contig"] and not last["c_contig"]
+    assert last["b_stride"] == (2 * 8 * 16, 16, 1)  # expert stride of packed w13
+    assert last["c_ptr_off"] == 8 * 16 * 4  # up half starts I rows later (fp32 bytes)
+    assert torch.equal(out, ref)
+
+
+def test_nograd_strided_keeps_copies_when_grad_needed(monkeypatch, fake_liger):
+    mod = _load()
+    sess, w13, _ = _session(mod)
+    x, ids, w = _inputs()
+    monkeypatch.setattr(mod, "NOGRAD_STRIDED", True)
+    out = mod.LigerCuteSession.__call__(sess, x, ids, w)  # grad enabled, params require grad
+    assert fake_liger[-1]["needs_grad"] and fake_liger[-1]["b_contig"] and fake_liger[-1]["c_contig"]
+    out.sum().backward()
+    assert w13.grad is not None
+
+
+def test_nograd_strided_used_when_nothing_requires_grad(monkeypatch, fake_liger):
+    # grad mode on but frozen params and plain inputs: moe_fused also takes the no-grad branch
+    mod = _load()
+    sess, *_ = _session(mod, requires_grad=False)
+    x, ids, w = _inputs()
+    monkeypatch.setattr(mod, "NOGRAD_STRIDED", True)
+    mod.LigerCuteSession.__call__(sess, x, ids, w)
+    assert not fake_liger[-1]["needs_grad"] and not fake_liger[-1]["b_contig"]
+
+
+def test_nograd_flag_default_off(monkeypatch):
+    monkeypatch.delenv("XTUNER_LIGER_NOGRAD_STRIDED", raising=False)
+    assert _load().NOGRAD_STRIDED is False
+    monkeypatch.setenv("XTUNER_LIGER_NOGRAD_STRIDED", "1")
+    assert _load().NOGRAD_STRIDED is True
