@@ -57,6 +57,39 @@ import os
 import torch
 
 
+# Candidate #1 (default off): split packed w13 with one copy in forward and a
+# single cat in backward, instead of two slice+contiguous nodes whose backward
+# allocates two zero-filled w13-sized buffers and adds them.
+W13_SPLIT_CAT = os.environ.get("XTUNER_LIGER_W13_SPLIT_CAT", "0") == "1"
+
+
+class _SplitW13(torch.autograd.Function):
+    """``[E, 2I, H]`` -> contiguous gate ``[E, I, H]`` and up ``[E, I, H]``.
+
+    Values are identical to ``w13[:, :I].contiguous()`` / ``w13[:, I:].contiguous()``.
+    The w13 gradient is ``cat([d_gate, d_up], 1)``; the default autograd path
+    computes ``(0 + d_gate) + (0 + d_up)`` over zero-padded buffers, which only
+    differs in the sign of zero (-0.0 becomes +0.0 there).
+    """
+
+    @staticmethod
+    def forward(ctx, w13: torch.Tensor, intermediate_size: int):
+        e, two_i, h = w13.shape
+        # One copy kernel: [E, 2, I, H] -> [2, E, I, H]; each half is contiguous.
+        halves = w13.view(e, 2, intermediate_size, h).transpose(0, 1).contiguous()
+        return halves[0], halves[1]
+
+    @staticmethod
+    def backward(ctx, d_gate, d_up):
+        if d_gate is None and d_up is None:
+            return None, None
+        if d_gate is None:
+            d_gate = torch.zeros_like(d_up)
+        if d_up is None:
+            d_up = torch.zeros_like(d_gate)
+        return torch.cat([d_gate, d_up], dim=1), None
+
+
 class LigerCuteSession:
     """Per-process Liger CuTe EP session; cached per (layer, ep_group)."""
 
@@ -172,8 +205,11 @@ class LigerCuteSession:
         # Differentiable copies: Liger's backward requires gate/up as separate
         # contiguous [E_local, I, H] tensors; autograd scatters the gradients
         # back into the fused XTuner parameter.
-        all_b = w13[:, : self.intermediate_size, :].contiguous()  # gate
-        all_c = w13[:, self.intermediate_size :, :].contiguous()  # up
+        if W13_SPLIT_CAT:
+            all_b, all_c = _SplitW13.apply(w13, self.intermediate_size)
+        else:
+            all_b = w13[:, : self.intermediate_size, :].contiguous()  # gate
+            all_c = w13[:, self.intermediate_size :, :].contiguous()  # up
         all_a = w2  # [E_local, H, I], already contiguous
 
         trace = os.environ.get("LIGER_TRACE") in ("1", "pre")
