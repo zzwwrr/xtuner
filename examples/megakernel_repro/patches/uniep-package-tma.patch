@@ -1,0 +1,12 @@
+diff --git a/python/setup.py b/python/setup.py
+index eb5211d..fdaeea1 100644
+--- a/python/setup.py
++++ b/python/setup.py
+@@ -374,6 +374,7 @@ def get_packages():
+         "triton_dist/kernels/amd",
+         "triton_dist/kernels/metax",
+         "triton_dist/language",
++        "triton_dist/language/tma",
+         "triton_dist/language/extra",
+         "triton_dist/language/extra/cuda",
+         "triton_dist/language/extra/hip",

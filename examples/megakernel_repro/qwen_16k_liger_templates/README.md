@@ -1,5 +1,7 @@
 # Qwen 16K：Liger 已选模板和现成菜单筛选
 
+环境准备：[安装／编译](../INSTALL.md) · [补丁说明](../patches/README.md)。
+
 完整 Qwen3-30B-A3B，48 层、BF16、EP8/FSDP1、GB32、16K pack、g1、rc1、compile、FA3、chunk CE1024。non-RDC、W13 split/cat 开启、no-grad strided 关闭，split-K 原生选择。A/B 都使用 Liger，仅模板改变。
 
 | 配置 | 前向 tuple | 反向 tuple |

@@ -1,5 +1,7 @@
 # Qwen 2K：开启主层重算的后端对照
 
+环境准备：[安装／编译](../INSTALL.md) · [补丁说明](../patches/README.md)。
+
 完整 Qwen3-30B-A3B，48 层、BF16、EP8/FSDP1、GB32、2K pack、g1、rc1、eager、FA2、eager CE。优化器、数据、seed0 与 rc0 实验保持原设置。当前源码最后一层排除 checkpoint，因此 rc1 对前 47 个主层重算。
 
 顺序为 native → Liger → Liger → native，各 80 步，从同一模型初始化。只替换 routed MoE 后端。计时窗口 11–79 步，原 80 步 LR schedule 完整保留。

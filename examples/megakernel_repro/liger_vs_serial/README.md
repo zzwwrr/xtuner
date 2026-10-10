@@ -1,5 +1,7 @@
 # Liger 对 Serial 的隔离单层测试
 
+环境准备：[安装／编译](../INSTALL.md) · [补丁说明](../patches/README.md)。
+
 测试整个 `dispatch → experts → combine` 的前向和反向。Serial 使用 DeepEP＋Transformer Engine；输入是固定随机种子生成的激活、权重、路由和上游梯度，独立于完整 XTuner 训练。
 
 固定单机 EP8，每 rank T8192（8K token）、H2048/I768/E128/K8、BF16、seed42；各卡随机种子为 seed＋rank。DeepEP 使用 24 SM。先以 FP32 reference 核对 Y、dX、路由概率梯度和专家权重梯度，再做 5 次 warmup、20 次计时。前向和反向 CUDA Events 分别计时，逐次取八 rank 最大值再求均值。没有外层 checkpoint。

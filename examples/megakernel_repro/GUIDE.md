@@ -13,6 +13,8 @@
 
 ## 环境和输入
 
+首次准备环境请按 [安装与编译指南](INSTALL.md) 操作；UniEP 依赖修复、Liger 离线 tuner 修复和分支内 W13 改动说明在 [补丁指南](patches/README.md)。
+
 原实验使用单机八张 H200、SM90、NVLink，训练源码基线为 `cb005e65fa54f9ee56a55778aeffa4bba9eed2af`。本目录提交只新增复现文件，沿用该接入实现。Qwen 训练固定 48 层、H2048/I768/E128/K8、BF16、EP8/FSDP1、GB32、g1。
 
 训练环境记录：Python 3.12、PyTorch 2.9.1+cu128、Triton 3.5.1、cuDNN runtime 9.15.1.9、cuDNN frontend 1.10.0，安装 DeepEP、NVSHMEM、Liger Kernel 及匹配的 Liger CuTe native 包。2K 使用 FA2；16K 使用 FA3。单层 Serial 还需要 Transformer Engine（原环境 2.11）。这些是原环境版本记录；安装时还需按各项目构建说明匹配 CUDA 和 native ABI。

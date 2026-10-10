@@ -1,5 +1,7 @@
 # Qwen 2K：关闭主层重算的后端对照
 
+环境准备：[安装／编译](../INSTALL.md) · [补丁说明](../patches/README.md)。
+
 完整 Qwen3-30B-A3B，48 层、BF16、EP8/FSDP1、GB32、2K pack、g1、rc0、eager、FA2、eager CE。AdamW foreach 保持 `None`，不更改原优化器选择。只将 routed MoE 从 native 换成 Liger，router、attention、loss 和训练框架保持同配置。
 
 顺序为 native → Liger → Liger → native，各 80 步，从同一模型初始化。两种后端使用同一数据和 seed0。计时窗口 11–79 步，完整八 rank tracker 用于有效 TGS 和数值检查。

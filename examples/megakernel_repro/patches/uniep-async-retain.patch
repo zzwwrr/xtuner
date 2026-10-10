@@ -1,0 +1,21 @@
+diff --git a/python/triton_dist/layers/nvidia/ep_a2a_fused_layer.py b/python/triton_dist/layers/nvidia/ep_a2a_fused_layer.py
+--- a/python/triton_dist/layers/nvidia/ep_a2a_fused_layer.py
++++ b/python/triton_dist/layers/nvidia/ep_a2a_fused_layer.py
+@@ -1048,7 +1048,16 @@
+                 num_stages=gemm_num_stages,
+             )
+ 
+-        torch.cuda.current_stream().synchronize()
++        # Kernels read mapped pinned CPU counts directly. In no-grad/checkpoint
++        # forward the layout can die immediately after return; the CPU allocator
++        # may reuse and fill those bytes before this asynchronous kernel reads them.
++        # Keep the pinned allocation alive until this stream finishes the consumer.
++        pending = getattr(self, "_pending_combine_host_counts", [])
++        pending = [(event, tensor) for event, tensor in pending if not event.query()]
++        consumed = torch.cuda.Event()
++        consumed.record(torch.cuda.current_stream())
++        pending.append((consumed, ep_a2a_layout_desc.num_recv_tokens_per_rank))
++        self._pending_combine_host_counts = pending
+         self.ep_barrier_all()
+ 
+         reduce_buf = self.combine_out_buf

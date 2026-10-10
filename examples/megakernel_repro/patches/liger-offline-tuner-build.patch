@@ -1,0 +1,193 @@
+diff --git a/liger_cute_kernels/csrc/core/src/moe/moe_bwd.cu b/liger_cute_kernels/csrc/core/src/moe/moe_bwd.cu
+index 69ff522..8d2c334 100644
+--- a/liger_cute_kernels/csrc/core/src/moe/moe_bwd.cu
++++ b/liger_cute_kernels/csrc/core/src/moe/moe_bwd.cu
+@@ -1,6 +1,9 @@
+ #ifndef LIGER_CUTE_DISPATCH_COMPUTE
+ #define LIGER_CUTE_DISPATCH_COMPUTE 0
+ #endif
++#ifndef LIGER_MOE_BWD_TUNE_PART
++#define LIGER_MOE_BWD_TUNE_PART 0
++#endif
+ 
+ #if LIGER_CUTE_DISPATCH_COMPUTE == 90
+ #include "moe_bwd_sm90.inc"
+diff --git a/liger_cute_kernels/csrc/core/src/moe/moe_bwd_sm90.inc b/liger_cute_kernels/csrc/core/src/moe/moe_bwd_sm90.inc
+index 532eb62..187c22c 100644
+--- a/liger_cute_kernels/csrc/core/src/moe/moe_bwd_sm90.inc
++++ b/liger_cute_kernels/csrc/core/src/moe/moe_bwd_sm90.inc
+@@ -2265,6 +2265,16 @@ moe_bwd_fwd_bf16_tuned(const MoeBwdArgs& a, int static_nsplit) {
+ 	moe_bwd_fwd_bf16<Config>(a, static_nsplit);
+ }
+ 
++// The tuner translation unit takes the address of every selected wrapper.
++// Part 1 has no local dispatch table, so emit explicit instantiations there;
++// otherwise the host wrappers can be dropped while their device kernels remain.
++#if defined(LIGER_MOE_BWD_TUNE_PART) && LIGER_MOE_BWD_TUNE_PART > 0
++#define LIGER_MOE_BWD_EXPLICIT_INST_SM90(NS2, TN1, TK1, S1, TM3, TN3, TK3, S3, EN1, EN25, EN34, CS, TM) \
++	template void moe_bwd_fwd_bf16_tuned<NS2, TN1, TK1, S1, TM3, TN3, TK3, S3, EN1, EN25, EN34, CS, TM, TM, 90>(const MoeBwdArgs&, int);
++LIGER_MOE_BWD_TUNE_CONFIGS_SELECTED(LIGER_MOE_BWD_EXPLICIT_INST_SM90)
++#undef LIGER_MOE_BWD_EXPLICIT_INST_SM90
++#endif
++
+ // ── Runtime dispatch table for tuned-config lookup ────────────────────
+ 
+ using MoeBwdFwdFn = void (*)(const MoeBwdArgs&, int static_nsplit);
+@@ -2297,7 +2307,7 @@ struct DispatchEntryBwd {
+ 
+ static const DispatchEntryBwd kDispatchTableBwd[] = {
+ #if LIGER_CUTE_DISPATCH_COMPUTE == 0 || LIGER_CUTE_DISPATCH_COMPUTE == 90
+-	LIGER_MOE_BWD_DISPATCH_CONFIGS_SM90(LIGER_MOE_BWD_DISPATCH_ENTRY_SM90, LIGER_MOE_BWD_DISPATCH_ENTRY_G_SM90)
++	LIGER_MOE_BWD_TUNE_CONFIGS_SELECTED(LIGER_MOE_BWD_DISPATCH_ENTRY_SM90)
+ #endif
+ #if LIGER_CUTE_DISPATCH_COMPUTE == 0 || LIGER_CUTE_DISPATCH_COMPUTE == 100
+ 	LIGER_MOE_BWD_DISPATCH_CONFIGS_SM100(LIGER_MOE_BWD_DISPATCH_ENTRY_SM100, LIGER_MOE_BWD_DISPATCH_ENTRY_G_SM100)
+@@ -2485,6 +2495,7 @@ static bool find_nearest_tuned_bwd(int compute, int TK, int TKE, int D, int I,
+ // Internal auto-dispatch: nearest tuned bwd config for the runtime shape (or
+ // LIGER_MOE_BWD_FORCE_CONFIG), then invoke the matching template instantiation.
+ // All shape info comes from the MoeBwdArgs bundle; the launcher writes the grads.
++#if !defined(LIGER_MOE_BWD_TUNE_PART) || LIGER_MOE_BWD_TUNE_PART <= 0
+ void moe_bwd_dispatch(const MoeBwdArgs& a, int fwd_tile_m) {
+ 	const int T  = a.num_tokens;
+ 	const int D  = a.hidden_dim;
+@@ -2579,5 +2590,6 @@ moe_bwd_list_compiled_configs() {
+ 	}
+ 	return out;
+ }
++#endif
+ 
+ } // namespace liger
+diff --git a/liger_cute_kernels/csrc/core/src/moe/moe_fwd_bwd_tune_configs_sm90.hpp b/liger_cute_kernels/csrc/core/src/moe/moe_fwd_bwd_tune_configs_sm90.hpp
+index 3edbab6..6c9d307 100644
+--- a/liger_cute_kernels/csrc/core/src/moe/moe_fwd_bwd_tune_configs_sm90.hpp
++++ b/liger_cute_kernels/csrc/core/src/moe/moe_fwd_bwd_tune_configs_sm90.hpp
+@@ -119,18 +119,22 @@
+ 	X(128, 64, 4, 64, 192, 64, 4, 64, 4, 2, 128)
+ 
+ // ── BWD · TileM=64 (Phase-1 N-split, NC=2) ──────────────────────────
+-#define LIGER_MOE_BWD_TUNE_CONFIGS_TM64(X) \
++#define LIGER_MOE_BWD_TUNE_CONFIGS_TM64_PART0(X) \
+ 	X(6, 128, 64, 4, 256, 128, 64, 2, 32, 64, 64, 2, 64) \
+ 	X(2, 128, 64, 4, 128, 256, 64, 2, 32, 64, 64, 2, 64) \
+ 	X(16, 128, 64, 4, 128, 256, 64, 2, 32, 64, 64, 2, 64) \
+-	X(8, 128, 64, 4, 256, 128, 64, 2, 32, 64, 64, 2, 64) \
++	X(8, 128, 64, 4, 256, 128, 64, 2, 32, 64, 64, 2, 64)
++#define LIGER_MOE_BWD_TUNE_CONFIGS_TM64_PART1(X) \
+ 	X(4, 128, 64, 4, 256, 128, 64, 2, 32, 64, 64, 2, 64) \
+ 	X(8, 128, 64, 4, 128, 256, 64, 2, 32, 64, 64, 2, 64) \
+ 	X(2, 128, 64, 4, 256, 128, 64, 2, 32, 64, 64, 2, 64) \
+ 	X(16, 128, 64, 4, 256, 128, 64, 2, 32, 64, 64, 2, 64)
++#define LIGER_MOE_BWD_TUNE_CONFIGS_TM64(X) \
++	LIGER_MOE_BWD_TUNE_CONFIGS_TM64_PART0(X) \
++	LIGER_MOE_BWD_TUNE_CONFIGS_TM64_PART1(X)
+ 
+ // ── BWD · TileM=128 (Phase-1 M-split, NC=4 — divisibility relaxed) ──
+-#define LIGER_MOE_BWD_TUNE_CONFIGS_TM128(X) \
++#define LIGER_MOE_BWD_TUNE_CONFIGS_TM128_PART0(X) \
+ 	X(2, 128, 64, 4, 128, 256, 64, 2, 32, 64, 64, 2, 128) \
+ 	X(4, 128, 64, 4, 128, 256, 64, 2, 32, 64, 64, 3, 128) \
+ 	X(8, 128, 64, 4, 128, 256, 64, 2, 32, 64, 64, 3, 128) \
+@@ -138,7 +142,8 @@
+ 	X(6, 128, 64, 4, 128, 256, 64, 2, 32, 64, 64, 3, 128) \
+ 	X(16, 128, 64, 4, 128, 256, 64, 2, 32, 64, 64, 2, 128) \
+ 	X(16, 128, 64, 4, 128, 256, 64, 2, 32, 64, 64, 3, 128) \
+-	X(8, 128, 64, 4, 128, 256, 64, 2, 32, 64, 64, 2, 128) \
++	X(8, 128, 64, 4, 128, 256, 64, 2, 32, 64, 64, 2, 128)
++#define LIGER_MOE_BWD_TUNE_CONFIGS_TM128_PART1(X) \
+ 	X(4, 128, 64, 4, 128, 256, 64, 2, 32, 64, 64, 2, 128) \
+ 	X(2, 128, 64, 4, 256, 128, 64, 2, 32, 64, 64, 3, 128) \
+ 	X(4, 128, 64, 4, 256, 128, 64, 2, 32, 64, 64, 3, 128) \
+@@ -146,6 +151,9 @@
+ 	X(6, 128, 64, 4, 256, 128, 64, 2, 32, 64, 64, 2, 128) \
+ 	X(16, 128, 64, 4, 256, 128, 64, 2, 32, 64, 64, 2, 128) \
+ 	X(16, 128, 64, 4, 256, 128, 64, 2, 32, 64, 64, 3, 128)
++#define LIGER_MOE_BWD_TUNE_CONFIGS_TM128(X) \
++	LIGER_MOE_BWD_TUNE_CONFIGS_TM128_PART0(X) \
++	LIGER_MOE_BWD_TUNE_CONFIGS_TM128_PART1(X)
+ 
+ 
+ // ── Direction unions (whole menu per direction; fed to the .cu files) ─
+@@ -162,9 +170,25 @@
+ #define LIGER_MOE_BWD_TUNE_CONFIGS(X) \
+ 	X(4, 128, 64, 4, 128, 256, 64, 2, 32, 64, 64, 3, 128)
+ #else
++#ifndef LIGER_MOE_BWD_TUNE_PART
++#define LIGER_MOE_BWD_TUNE_PART -1
++#endif
+ #define LIGER_MOE_BWD_TUNE_CONFIGS(X) \
+ 	LIGER_MOE_BWD_TUNE_CONFIGS_TM64(X) \
+ 	LIGER_MOE_BWD_TUNE_CONFIGS_TM128(X)
++#define LIGER_MOE_BWD_TUNE_CONFIGS_PART0(X) \
++	LIGER_MOE_BWD_TUNE_CONFIGS_TM64_PART0(X) \
++	LIGER_MOE_BWD_TUNE_CONFIGS_TM128_PART0(X)
++#define LIGER_MOE_BWD_TUNE_CONFIGS_PART1(X) \
++	LIGER_MOE_BWD_TUNE_CONFIGS_TM64_PART1(X) \
++	LIGER_MOE_BWD_TUNE_CONFIGS_TM128_PART1(X)
++#if LIGER_MOE_BWD_TUNE_PART == 0
++#define LIGER_MOE_BWD_TUNE_CONFIGS_SELECTED(X) LIGER_MOE_BWD_TUNE_CONFIGS_PART0(X)
++#elif LIGER_MOE_BWD_TUNE_PART == 1
++#define LIGER_MOE_BWD_TUNE_CONFIGS_SELECTED(X) LIGER_MOE_BWD_TUNE_CONFIGS_PART1(X)
++#else
++#define LIGER_MOE_BWD_TUNE_CONFIGS_SELECTED(X) LIGER_MOE_BWD_TUNE_CONFIGS(X)
++#endif
+ #endif
+ 
+ // ═══════════════════════════════════════════════════════════════════
+diff --git a/liger_cute_kernels/csrc/core/src/moe/tune/CMakeLists.txt b/liger_cute_kernels/csrc/core/src/moe/tune/CMakeLists.txt
+index 24a7a36..b362596 100644
+--- a/liger_cute_kernels/csrc/core/src/moe/tune/CMakeLists.txt
++++ b/liger_cute_kernels/csrc/core/src/moe/tune/CMakeLists.txt
+@@ -97,8 +97,13 @@ add_executable(tune_moe_fwd_bwd
+     "${CMAKE_CURRENT_SOURCE_DIR}/tune_moe_fwd_bwd.cu"
+     "${_MOE}/moe.cu"
+     "${_MOE}/moe_bwd.cu"
++    "${_MOE}/moe_bwd_part1.cu"
+     "${_CORESRC}/nvshmem.cu"
+     "${_CORESRC}/liger_cute.cu"
++    "${_CORESRC}/detail/tp_reduce.cu"
++    "${_CORESRC}/detail/remote_all_reduce.cu"
++    "${_CORESRC}/fused_scaled_linear_cross_entropy/workspace.cu"
++    "${_CORESRC}/fused_scaled_linear_cross_entropy/forward_reduce.cu"
+ )
+ 
+ set_target_properties(tune_moe_fwd_bwd PROPERTIES
+diff --git a/liger_cute_kernels/csrc/core/src/moe/tune/tune_moe_fwd_bwd.cu b/liger_cute_kernels/csrc/core/src/moe/tune/tune_moe_fwd_bwd.cu
+index 900dd9f..97d8ca8 100644
+--- a/liger_cute_kernels/csrc/core/src/moe/tune/tune_moe_fwd_bwd.cu
++++ b/liger_cute_kernels/csrc/core/src/moe/tune/tune_moe_fwd_bwd.cu
+@@ -297,6 +297,10 @@ struct TunerEntryBwd {
+ 	MoeBwdFwdFn fn;
+ };
+ 
++#ifndef LIGER_MOE_BWD_TUNE_PART
++#define LIGER_MOE_BWD_TUNE_PART -1
++#endif
++
+ #define LIGER_MOE_BWD_RUNTIME_NS_SEED 8
+ 
+ #define LIGER_MOE_BWD_REGISTRY_ENTRY_C(Compute, NS2, TN1, TK1, S1, TM3, TN3, TK3, S3, EN1, EN25, EN34, CS, TM) \
+@@ -316,7 +320,7 @@ struct TunerEntryBwd {
+ 
+ static const TunerEntryBwd kRegistryBwd[] = {
+ #if LIGER_CUTE_DISPATCH_COMPUTE == 0 || LIGER_CUTE_DISPATCH_COMPUTE == 90
+-	LIGER_MOE_BWD_TUNE_CONFIGS(LIGER_MOE_BWD_REGISTRY_ENTRY_SM90)
++	LIGER_MOE_BWD_TUNE_CONFIGS_SELECTED(LIGER_MOE_BWD_REGISTRY_ENTRY_SM90)
+ #endif
+ #if LIGER_CUTE_DISPATCH_COMPUTE == 0 || LIGER_CUTE_DISPATCH_COMPUTE == 100
+ 	LIGER_MOE_BWD_TUNE_CONFIGS_SM100(LIGER_MOE_BWD_REGISTRY_ENTRY_SM100)
+diff --git a/liger_cute_kernels/csrc/core/src/moe/moe_bwd_part1.cu b/liger_cute_kernels/csrc/core/src/moe/moe_bwd_part1.cu
+new file mode 100644
+index 0000000..ba52e6a
+--- /dev/null
++++ b/liger_cute_kernels/csrc/core/src/moe/moe_bwd_part1.cu
+@@ -0,0 +1,10 @@
++#ifndef LIGER_CUTE_DISPATCH_COMPUTE
++#define LIGER_CUTE_DISPATCH_COMPUTE 0
++#endif
++#define LIGER_MOE_BWD_TUNE_PART 1
++
++#if LIGER_CUTE_DISPATCH_COMPUTE == 90
++#include "moe_bwd_sm90.inc"
++#else
++#include "moe_bwd_sm100.inc"
++#endif
