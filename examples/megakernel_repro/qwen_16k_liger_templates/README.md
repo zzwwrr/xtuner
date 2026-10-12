@@ -18,11 +18,10 @@
 ```bash
 "$PYTHON" examples/megakernel_repro/qwen_16k_liger_templates/run.py --check-config
 export GPU_AUTHORIZATION=GRANTED_BY_USER
-"$PYTHON" examples/megakernel_repro/qwen_16k_liger_templates/run.py --execute \
-  --block-start-utc 2026-10-10T00:00:00+00:00
+"$PYTHON" examples/megakernel_repro/qwen_16k_liger_templates/run.py --execute
 ```
 
-替换时间参数为实际 allocation 起点。`summary.json` 汇总完整四臂的有效 TGS、步时、PyTorch 显存峰值和配对/自重复数值检查。
+`summary.json` 汇总完整四臂的有效 TGS、步时、PyTorch 显存峰值和配对/自重复数值检查。
 
 ## 重新筛选菜单
 
@@ -30,8 +29,7 @@ export GPU_AUTHORIZATION=GRANTED_BY_USER
 
 ```bash
 "$PYTHON" examples/megakernel_repro/qwen_16k_liger_templates/run.py --sweep
-"$PYTHON" examples/megakernel_repro/qwen_16k_liger_templates/run.py --sweep --execute \
-  --block-start-utc 2026-10-10T00:00:00+00:00
+"$PYTHON" examples/megakernel_repro/qwen_16k_liger_templates/run.py --sweep --execute
 ```
 
 `capture_hook.py` 采集 checkpoint 重放中第一份有梯度调用，并用该调用的输出 hook 保存对应 dY。`single_sweep.py` 先试十份前向，再试十五份反向，最后试前两份/后三份的组合，5 次 warmup、20 次计时；每轮完成首次前向、重放和反向后才换模板。数值筛选参照同输入的当前 Liger 模板，属于 screening。安装 binary 必须覆盖 `template_inventory.json` 的菜单；该菜单不是全参数笛卡尔积。

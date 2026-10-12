@@ -11,11 +11,10 @@
 ```bash
 "$PYTHON" examples/megakernel_repro/qwen_2k_rc1/run.py --check-config
 export GPU_AUTHORIZATION=GRANTED_BY_USER
-"$PYTHON" examples/megakernel_repro/qwen_2k_rc1/run.py --execute \
-  --block-start-utc 2026-10-10T00:00:00+00:00
+"$PYTHON" examples/megakernel_repro/qwen_2k_rc1/run.py --execute
 ```
 
-时间参数替换为实际 allocation 起点。入口默认打印计划；四臂结果和数值检查写入 `runs/<UTC>/summary.json`。
+入口默认打印计划；四臂结果和数值检查写入 `runs/<UTC>/summary.json`。
 
 Liger tuple、non-RDC 及 W13 标志与 [rc0 实验](../qwen_2k_rc0/README.md) 相同。主层 checkpoint 会重放层内 attention、router、专家及 MoE 通信；Liger backward 内部激活重建是另一层机制。
 

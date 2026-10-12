@@ -9,7 +9,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import time
 
 from metrics import read_run, summarize
 
@@ -83,6 +82,7 @@ def run(spec, suite, output, args, *, single=False, capture_dir=None):
     if args.check_config:
         command = [args.python, str(entry), '--check-config']
     provenance = dict(command=command, source=str(REPO),
+                      supplied_allocation_start=getattr(args, "block_start_utc", None),
                       commit=subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip(),
                       diff=subprocess.check_output(['git', '-C', str(REPO), 'diff', '--stat'], text=True),
                       environment={key: value for key, value in env.items()
@@ -124,7 +124,7 @@ def main(case, suite):
     parser.add_argument('--python', default=sys.executable)
     parser.add_argument('--out', type=Path)
     parser.add_argument('--timeout', type=int, default=1800, help='Per-run timeout in seconds')
-    parser.add_argument('--block-start-utc', help='Actual start of a two-hour GPU allocation')
+    parser.add_argument('--block-start-utc', help='Optional allocation start for provenance; no fixed cutoff')
     if case == 'qwen_16k_liger_templates':
         parser.add_argument('--sweep', action='store_true', help='Capture + stock single-layer sweep + screens + ABBA')
     args = parser.parse_args()
@@ -141,15 +141,6 @@ def main(case, suite):
     if args.execute:
         if os.environ.get('GPU_AUTHORIZATION') != 'GRANTED_BY_USER':
             parser.error('Explicit GPU authorization is required: GPU_AUTHORIZATION=GRANTED_BY_USER')
-        if not args.block_start_utc:
-            parser.error('--block-start-utc is required for GPU execution')
-        start = dt.datetime.fromisoformat(args.block_start_utc)
-        if start.tzinfo is None or not 0 <= time.time() - start.timestamp() < 7200:
-            parser.error('Supply the actual, timezone-aware allocation start')
-        # Admit a complete experiment, leaving the final 15 minutes for evidence and release.
-        budget = 3600 if case == 'qwen_16k_liger_templates' else 1800
-        if time.time() + budget > start.timestamp() + 105 * 60:
-            parser.error('The complete experiment does not fit this resource block')
     output = (args.out or suite / 'runs' / dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')).resolve()
     for protected in (Path('/root/models'), Path('/mnt/shared-storage-user'), Path('/root/codespace'),
                       Path(os.environ['QWEN3_MOE_PATH']).resolve(), Path(os.environ['ALPACA_PATH']).resolve()):

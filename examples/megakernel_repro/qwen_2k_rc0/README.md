@@ -11,11 +11,10 @@
 ```bash
 "$PYTHON" examples/megakernel_repro/qwen_2k_rc0/run.py --check-config
 export GPU_AUTHORIZATION=GRANTED_BY_USER
-"$PYTHON" examples/megakernel_repro/qwen_2k_rc0/run.py --execute \
-  --block-start-utc 2026-10-10T00:00:00+00:00
+"$PYTHON" examples/megakernel_repro/qwen_2k_rc0/run.py --execute
 ```
 
-时间参数替换为实际 allocation 起点。入口默认只打印计划；完成后 `runs/<UTC>/summary.json` 汇总四次运行。共享脚本在 `../common/`。
+入口默认只打印计划；完成后 `runs/<UTC>/summary.json` 汇总四次运行。共享脚本在 `../common/`。
 
 Liger 固定 non-RDC，W13 split/cat 开启、no-grad strided 关闭，split-K 沿用原生选择。前向 tuple 为 `128,64,4,64,128,64,4,64,4,4,128`；反向为 `16,128,64,4,256,128,64,2,32,64,64,3,128`。
 

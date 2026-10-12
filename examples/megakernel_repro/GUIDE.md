@@ -1,6 +1,6 @@
 # MegaKernel 预研实验复现
 
-这份目录配套 XTuner 的 UniEP / Liger CuTe EP 接入分支，包含报告中的四组实验。入口已整理为仓库相对路径，不依赖原来的 `Missions/`、本地授权文件或多层 runner。原始实验执行过；这次发布只完成 CPU 检查，没有重新运行 GPU 实验。
+这份目录配套 XTuner 的 UniEP / Liger CuTe EP 接入分支，包含报告中的五组实验。入口已整理为仓库相对路径，不依赖原来的 `Missions/`、本地授权文件或多层 runner。原始实验执行过；这次发布只完成 CPU 检查，没有重新运行 GPU 实验。
 
 | 目录 | 测什么 | 原始结果 |
 |---|---|---|
@@ -8,8 +8,9 @@
 | [qwen_2k_rc0](qwen_2k_rc0/README.md) | 完整 Qwen，2K、关闭主层重算，仅替换 routed MoE 后端 | 吞吐 +19.14% |
 | [qwen_2k_rc1](qwen_2k_rc1/README.md) | 完整 Qwen，2K、开启主层重算，仅替换 routed MoE 后端 | 吞吐 +29.49% |
 | [qwen_16k_liger_templates](qwen_16k_liger_templates/README.md) | 固定 16K Liger 训练配置，筛选现成模板并确认候选 | 7970.69 → 8078.82 有效 token/s/卡；+1.36% |
+| [qwen_ffn_real_inputs](qwen_ffn_real_inputs/README.md) | 真实训练输入下，XTuner native / Liger 的8K、16K单层FFN正反向 | 前向1.753× / 1.810×；合计0.988× / 1.075× |
 
-`Serial` 是 DeepEP＋Transformer Engine 的隔离层基线；`native` 是 XTuner 的 DeepEP＋Triton grouped GEMM 路径。16K 的 A/B 都是 Liger，比较模板，不计算相对 native 的后端收益。数值检查和性能分别报告，历史训练对照存在部分 grad_norm 超差。
+`Serial` 是 DeepEP＋Transformer Engine 的隔离层基线；`native` 是 XTuner 的 DeepEP＋Triton grouped GEMM 路径。16K模板筛选组的 A/B 都是 Liger，比较模板，不计算相对 native 的后端收益。数值检查和性能分别报告，历史训练对照存在部分 grad_norm 超差。
 
 ## 环境和输入
 
@@ -17,7 +18,7 @@
 
 原实验使用单机八张 H200、SM90、NVLink，训练源码基线为 `cb005e65fa54f9ee56a55778aeffa4bba9eed2af`。本目录提交只新增复现文件，沿用该接入实现。Qwen 训练固定 48 层、H2048/I768/E128/K8、BF16、EP8/FSDP1、GB32、g1。
 
-训练环境记录：Python 3.12、PyTorch 2.9.1+cu128、Triton 3.5.1、cuDNN runtime 9.15.1.9、cuDNN frontend 1.10.0，安装 DeepEP、NVSHMEM、Liger Kernel 及匹配的 Liger CuTe native 包。2K 使用 FA2；16K 使用 FA3。单层 Serial 还需要 Transformer Engine（原环境 2.11）。这些是原环境版本记录；安装时还需按各项目构建说明匹配 CUDA 和 native ABI。
+训练环境记录：Python 3.12、PyTorch 2.9.1+cu128、Triton 3.5.1、cuDNN runtime 9.15.1.9、cuDNN frontend 1.10.0，安装 DeepEP、NVSHMEM、Liger Kernel 及匹配的 Liger CuTe native 包。2K 使用 FA2；16K模板筛选与新增8K/16K真实输入单层测试使用 FA3。单层 Serial 还需要 Transformer Engine（原环境 2.11）。这些是原环境版本记录；安装时还需按各项目构建说明匹配 CUDA 和 native ABI。
 
 Liger 训练使用 SM90 non-RDC binary，并要求 `LIGER_MOE_FORCE_CONFIG` / `LIGER_MOE_BWD_FORCE_CONFIG` 选择接口。16K 菜单在该目录的 `template_inventory.json`，运行前确认安装包编译了这些 tuple。候选菜单和开关来自预研时安装的 native 包；仅安装普通 Python 包不代表所有 native 模板已就绪。复现脚本使用当前环境，不自动安装、升级或编译依赖。
 
@@ -46,20 +47,21 @@ export LD_PRELOAD="$NVSHMEM_LIBDIR/libnvshmem_host.so.3${LD_PRELOAD:+:$LD_PRELOA
 
 ## 查看计划和检查配置
 
-三个 Qwen 入口默认打印计划，不启动 GPU job：
+Qwen 入口默认打印计划，不启动 GPU job：
 
 ```bash
 "$PYTHON" examples/megakernel_repro/qwen_2k_rc0/run.py
 "$PYTHON" examples/megakernel_repro/qwen_2k_rc1/run.py
 "$PYTHON" examples/megakernel_repro/qwen_16k_liger_templates/run.py
 "$PYTHON" examples/megakernel_repro/qwen_16k_liger_templates/run.py --sweep
+"$PYTHON" examples/megakernel_repro/qwen_ffn_real_inputs/run.py
 ```
 
 加 `--check-config` 会构造 A/B 的训练配置并保存实际配置及依赖来源；不执行训练。依赖导入可能进行设备发现。单层 benchmark 用 `bash -n` 检查启动脚本，`compare.py --help` 查看固定形状参数。
 
 ## 执行和结果读取
 
-取得对应 GPU 执行授权、确认八卡独占且依赖已准备后，设置 `GPU_AUTHORIZATION=GRANTED_BY_USER`。Qwen 入口用 `--execute --block-start-utc <实际 allocation 起点>`；默认完整 ABBA，失败立即停止并保留日志，不补齐失败结果。两个小时资源块的最后十五分钟用于收尾，脚本在启动前预留完整实验的预算。2296 执行仍应由 2999 发布已授权 assignment。
+取得对应 GPU 执行授权、确认八卡独占且依赖已准备后，设置 `GPU_AUTHORIZATION=GRANTED_BY_USER`。Qwen 入口用 `--execute`，失败立即停止并保留日志，不补齐失败结果。原三组训练入口默认完整ABBA；新增真实输入单层入口每档一组A/B。入口不再要求默认两小时资源块、allocation起点或固定收尾时限，显式指定的运行窗口由调用者安排。2296 执行仍应由 2999 发布已授权 assignment。
 
 每个目录的 README 有完整命令。一次只运行一组实验。默认输出为该目录 `runs/<UTC>/`，也可用 `--out` 指定工作区内一个尚不存在的专用目录。保持 `--python` 指向准备好的环境。无需给训练加 profiler，profile 数据不进入本组吞吐结果。
 
@@ -69,10 +71,12 @@ Qwen 固定原来的 80 步 LR schedule，短 run 通过截断迭代器停在 2/
 
 ## 文件怎么组织
 
-各实验目录包含入口和 README；训练目录还包含 `train_config.py`。`common/` 是三个训练实验实际消费的共用配置、训练入口、顺序运行和 tracker 汇总代码。16K 目录另有真实输入采集、单层菜单筛选和冻结模板菜单，可通过 `--sweep` 执行完整搜索过程。
+各实验目录包含入口和 README；训练目录还包含 `train_config.py`。`common/` 是三个训练实验实际消费的共用配置、训练入口、顺序运行和 tracker 汇总代码。16K 目录另有真实输入采集、单层菜单筛选和冻结模板菜单，可通过 `--sweep` 执行完整搜索过程。新增 `qwen_ffn_real_inputs/` 复用训练配置与训练入口，提供两档实采、native/Liger单层回放和CPU七列表格汇总。
 
 原始入口对应预研资料中的 `1727-prep/perf-debug/run.sh`、`local-2999-f1-rc0-liger/run.py`、`local-2999-liger-gb32-rc1-20261007/run.py`、`local-2999-qwen-liger16k-template-sweep-20261010/run.py`；这些来源用于追溯，本仓库入口已消除相应本地目录依赖。
 
 ## 本次发布的检查
 
 Python 语法、shell 语法、三个默认计划及十份前向/十五份反向菜单检查通过。三个 Qwen 实验各构造 A/B 两份实际配置，除输入、输出、缓存路径外，与历史 resolved config 完整一致。CPU 汇总原始八 rank tracker 得到 2K rc0 的 1.191410×、rc1 的 1.294897×，以及 16K 候选的 8078.82 有效 token/s/卡；单层原始日志复算前向 2.147507×、合计 1.001638×。GPU 复跑应在调用者取得授权后执行。
+
+新增真实输入单层脚本的CPU检查包含：两档四份配置与原始resolved config匹配、原始1600条rank计时及32gate重新汇总，得到1.752534×/1.809944×前向和0.987785×/1.074877×合计。发布时未新增GPU运行。
